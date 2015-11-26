@@ -1,0 +1,470 @@
+C51 COMPILER V9.02   IAP15_DTH11                                                           11/26/2015 14:52:53 PAGE 1   
+
+
+C51 COMPILER V9.02, COMPILATION OF MODULE IAP15_DTH11
+OBJECT MODULE PLACED IN IAP15_DTH11.OBJ
+COMPILER INVOKED BY: C:\Keil\C51\BIN\C51.EXE IAP15_DTH11.C BROWSE DEBUG OBJECTEXTEND
+
+line level    source
+
+   1          
+   2          /*************  功能说明        **************
+   3          接收遥控端发来的指令进行舵机控制及温湿度采集回传
+   4          T1实现软件16位软件PWM（T0实现软件16位软件PWM时不可屏蔽，因此选择T1）
+   5          TO定时
+   6          T2作为串口1的波特率发生器
+   7          
+   8          串口设置为：9600,8,n,1.
+   9          
+  10          
+  11          ******************************************/
+  12          #include "config0.H"
+  13          #include "delay.h"
+  14          #include "dth.h"
+  15          /*************  本地常量声明    **************/ //                                                                                                      
+  16          #define         MAIN_Fosc               24000000L       //定义主时钟
+  17          #define         RX1_Lenth               5                       //串口接收缓冲长度
+  18          #define         RX2_Lenth               5                       //串口接收缓冲长度
+  19          #define         S2RI  0x01                      //S2CON.0
+  20          #define         S2TI  0x02                       //S2CON.1
+  21          #define         S2_S0 0x01                 //P_SW2.0
+  22          #define         BaudRate1               9600L   //选择波特率
+  23          #define Timer2_Reload   (65536UL -(MAIN_Fosc / 4 / BaudRate1))          //Timer 2 重装值，
+  24          
+  25          #define step_period 2        //定义步进电机输出脉冲    
+  26          #define step_motor_right_step_pin P00
+  27          #define step_motor_right_dir_pin P01
+  28          #define step_motor_left_step_pin P02
+  29          #define step_motor_left_dir_pin P03
+  30          #define motor_en_right P04
+  31          #define motor_en_left P05
+  32          #define sw1 P06
+  33          
+  34          /*************  本地变量声明    **************/
+  35          u8 xx = 0;
+  36          u8 numberaa[] = {'0','1','2','3','4','5','6','7','8','9'};
+  37          u8      idata RX1_Buffer[RX1_Lenth];    //接收缓冲
+  38          u8      idata RX2_Buffer[RX2_Lenth];    //接收缓冲
+  39          u8      TX1_Cnt = 0;    //发送计数
+  40          u8      RX1_Cnt = 0;    //接收计数
+  41          bit     B_TX1_Busy;     //发送忙标志
+  42          bit uart2_busy = 0; 
+  43          bit test = 0;
+  44          
+  45          bit step_motor_left_flag = 0;
+  46          bit step_motor_right_flag = 0;
+  47          
+  48          bit turn_flag = 0;//左转或右转标志位
+  49          
+  50          bit dth11_flag = 0;
+  51          u8 uart_flag = 0; 
+  52          u8 Int0_flag = 0;
+  53          u16 step_t_1ms = 0;
+  54          
+  55          bit right_dir = 0;//右步进电机运行方向标志位
+C51 COMPILER V9.02   IAP15_DTH11                                                           11/26/2015 14:52:53 PAGE 2   
+
+  56          bit left_dir = 0;//左步进电机运行方向标志位
+  57          
+  58          u16 left_step_set = 0;//左电机运行步数设置
+  59          u16 right_step_set = 0;//右电机运行步数设置
+  60          
+  61          u16 left_step_temp = 0;//左电机运行步数临时值
+  62          u16 right_step_temp = 0;//右电机运行步数临时值
+  63          u8 uart_motor_com = 0;   //uart接收控制子缓冲区
+  64          
+  65          u8 flag = 0;
+  66          
+  67          u8 step_clock = 1; //抱死变量
+  68          /*************  本地函数声明    **************/
+  69          void UART_send_byte(u8 dat);
+  70          void UART_send_string(u8 *buf);
+  71          
+  72          void UART2_SendData(u8 dat);
+  73          void UART2_SendString(u8 *s);
+  74          void Timer0Init(void);          //1毫秒@24.000MHz
+  75          void handle(void);
+  76          void step_motor_control(u8 motor,u16 step,u8 dir);//步进电机控制函数
+  77          void Delay1ms(u16 x);           //@24.000MHz
+  78          void Delay1us(void);            //@24.000MHz
+  79          void clock_change(void);//抱死切换函数
+  80          /**********************************************/
+  81          void main(void)
+  82          {  
+  83   1      
+  84   1      
+  85   1              SCON  = (SCON & 0x3f) | 0x40;//UART1 8位可变波特率
+  86   1              S2CON = 0x50;                //UART2 8位可变波特率                              //8位数据
+  87   1      //      P_SW1 &= ~0xc0;                 //UART1 使用P30 P31口   默认    
+  88   1              P_SW1 = (P_SW1 & ~0xc0) | 0x40; //UART1 使用P36 P37口
+  89   1      //      P_SW1 = (P_SW1 & ~0xc0) | 0x80  //UART1 使用P16 P17口
+  90   1              
+  91   1              P_SW2 &= ~S2_S0;            //S2_S0=0 UART2 使用(P1.0/RxD2, P1.1/TxD2)
+  92   1      
+  93   1              AUXR &= ~(1<<4);        //Timer stop            波特率使用Timer2产生
+  94   1              AUXR |= 0x01;           //S1 BRT Use Timer2;
+  95   1              AUXR |=  (1<<2);        //Timer2 set as 1T mode
+  96   1              T2H = (u8)(Timer2_Reload >> 8);
+  97   1              T2L = (u8)Timer2_Reload;
+  98   1              AUXR |=  (1<<4);        //Timer run enable
+  99   1              REN = 1;        //允许接收
+ 100   1              PS = 1;//串口最高优先级
+ 101   1              ES  = 1;        //使能串口1中断
+ 102   1              //IE2 = 0x01; //使能串口2中断
+ 103   1      
+ 104   1              Timer0Init();
+ 105   1              EA = 1;
+ 106   1              motor_en_left = step_clock;
+ 107   1              motor_en_right = step_clock;    
+ 108   1         //UART_send_string("STC15F2K60S2\r\nUart1 Test !\r\n");
+ 109   1              while (1)
+ 110   1              {
+ 111   2                              clock_change();//是否抱死切换函数
+ 112   2                              if(uart_flag == 1)
+ 113   2                              {
+ 114   3                                      uart_flag = 0;
+ 115   3                                       handle();
+ 116   3                              }
+ 117   2                      
+C51 COMPILER V9.02   IAP15_DTH11                                                           11/26/2015 14:52:53 PAGE 3   
+
+ 118   2                      
+ 119   2              }
+ 120   1      }
+ 121          
+ 122          /********************* 定时器0初始化函数************************/
+ 123          void Timer0Init(void)           //1毫秒@24.000MHz
+ 124          {
+ 125   1              AUXR |= 0x80;           //定时器时钟1T模式
+ 126   1              TMOD &= 0xF0;           //设置定时器模式
+ 127   1              TL0 = 0x40;             //设置定时初值
+ 128   1              TH0 = 0xA2;             //设置定时初值
+ 129   1              TF0 = 0;                //清除TF0标志
+ 130   1              PT0 = 0;
+ 131   1              ET0 = 1;
+ 132   1              EA = 1;
+ 133   1              TR0 = 1;                //定时器0开始计时
+ 134   1              
+ 135   1      
+ 136   1      }
+ 137          /********************* 定时器0中断函数************************/
+ 138          void Timer0_interrupt(void) interrupt 1
+ 139          {
+ 140   1              step_t_1ms++; //步进电机计时变量
+ 141   1              if(step_t_1ms == step_period)             //步进电机脉冲周期 4ms
+ 142   1              {
+ 143   2                      //UART_send_string("STC15F2K60S2\r\nUart1 Test !\r\n");
+ 144   2                      step_t_1ms = 0;
+ 145   2                      
+ 146   2                      //右转向电机电机运行
+ 147   2                      if(step_motor_right_flag == 1) 
+ 148   2                      {
+ 149   3                              if(turn_flag == 1) //如果在转向状态
+ 150   3                              {
+ 151   4                                      motor_en_left = 0;//激活左电机驱动，抱死左电机，防止在转向时小球移动，
+ 152   4                              }
+ 153   3                              
+ 154   3                              step_motor_right_dir_pin = right_dir;  //右步进电机运行方向判断
+ 155   3                          if(right_step_temp < right_step_set)
+ 156   3                              {
+ 157   4                                      motor_en_right = 0;//使能右电机驱动板
+ 158   4                                  
+ 159   4                                      right_step_temp++;
+ 160   4                                      step_motor_right_step_pin = 1;
+ 161   4                                      Delay1us();
+ 162   4                                      step_motor_right_step_pin = 0;
+ 163   4                              
+ 164   4                              
+ 165   4                              }
+ 166   3                              else
+ 167   3                              {
+ 168   4                                      step_motor_right_flag = 0;
+ 169   4                                      right_step_temp = 0;
+ 170   4                                      motor_en_right = step_clock;//右电机驱动板失效，防止抱死发烫耗电
+ 171   4                                      if(turn_flag == 1) //转向完成后，取消动力电机抱死状态
+ 172   4                                      {
+ 173   5                                               turn_flag = 0;//退出转向状态
+ 174   5                                               motor_en_left = 1;//左（动力）电机驱动失效，不抱死左电机
+ 175   5                                      }
+ 176   4                              }
+ 177   3                      }
+ 178   2                      
+ 179   2                      //左电机电机运行
+C51 COMPILER V9.02   IAP15_DTH11                                                           11/26/2015 14:52:53 PAGE 4   
+
+ 180   2                      if(step_motor_left_flag == 1) 
+ 181   2                      {
+ 182   3                              
+ 183   3                              step_motor_left_dir_pin = left_dir;  //左步进电机运行方向判断
+ 184   3                          if(left_step_temp < left_step_set)
+ 185   3                              {
+ 186   4                                      motor_en_left = 0;//使能左电机驱动板
+ 187   4                                      left_step_temp++;
+ 188   4                                      step_motor_left_step_pin = 1;
+ 189   4                                      Delay1us();
+ 190   4                                      step_motor_left_step_pin = 0;
+ 191   4                              }
+ 192   3                              else
+ 193   3                              {
+ 194   4                                      step_motor_left_flag = 0;
+ 195   4                                      left_step_temp =0;
+ 196   4                                      motor_en_left = step_clock;//左电机驱动板失效，防止抱死发烫耗电
+ 197   4                              }
+ 198   3                      }
+ 199   2      
+ 200   2              }
+ 201   1      }
+ 202          /********************* UART1中断函数************************/
+ 203          void UART1_int (void) interrupt 4
+ 204          {
+ 205   1              if(RI)
+ 206   1              {
+ 207   2                      RI = 0;
+ 208   2                      ES = 0;
+ 209   2              RX1_Buffer[RX1_Cnt] = SBUF;
+ 210   2                      RX1_Cnt++;
+ 211   2                      if(RX1_Cnt==3)  
+ 212   2                      {
+ 213   3                              if((RX1_Buffer[0]=='x') && ( (RX1_Buffer[1]=='y')||(RX1_Buffer[1]=='z') ) )
+ 214   3                              {
+ 215   4                                      RX1_Cnt= 0;
+ 216   4                                      uart_flag = 1;
+ 217   4                              }
+ 218   3                              else
+ 219   3                              {}
+ 220   3                      }
+ 221   2                      ES = 1;
+ 222   2              }
+ 223   1      
+ 224   1      }
+ 225          /********************* UART2中断函数************************/
+ 226          void Uart2() interrupt 8 //using 1
+ 227          {
+ 228   1          if (S2CON & S2RI)
+ 229   1          {
+ 230   2              S2CON &= ~S2RI;         //清除S2RI位
+ 231   2              RX2_Buffer[0] = S2BUF;            
+ 232   2                      test = 1;
+ 233   2          }
+ 234   1          if (S2CON & S2TI)
+ 235   1          {
+ 236   2              S2CON &= ~S2TI;         //清除S2TI位
+ 237   2                      test = 0;
+ 238   2              uart2_busy = 0;               //清忙标志
+ 239   2          }
+ 240   1      }
+ 241          /*
+C51 COMPILER V9.02   IAP15_DTH11                                                           11/26/2015 14:52:53 PAGE 5   
+
+ 242           * UART1 发送一字节
+ 243          */
+ 244          void UART_send_byte(u8 dat)
+ 245          {
+ 246   1              SBUF = dat;
+ 247   1              while (TI == 0);  //等待发送完成
+ 248   1              TI = 0;
+ 249   1      }
+ 250          
+ 251          /*
+ 252           * UART1 发送字符串
+ 253          */
+ 254          void UART_send_string(u8 *buf) //函数形参是指针变量，也就是说实参必须是地址
+ 255          {
+ 256   1              while (*buf != '\0')//这是C语言中的，一行字符串数据的结尾系统都会加一个'\0'，程序运行到这边就会终止
+ 257   1              {
+ 258   2                      UART_send_byte(*buf++);
+ 259   2              }
+ 260   1      }
+ 261           /*----------------------------
+ 262          串口2发送字节数据
+ 263          ----------------------------*/
+ 264          void UART2_SendData(u8 dat)
+ 265          {
+ 266   1          S2BUF = dat;                //写数据到UART2数据寄存器
+ 267   1              uart2_busy = 1;
+ 268   1              while (uart2_busy);               //等待前面的数据发送完成
+ 269   1          
+ 270   1      }
+ 271          
+ 272          /*----------------------------
+ 273          串口2发送字符串
+ 274          ----------------------------*/
+ 275          void UART2_SendString(u8 *s)
+ 276          {
+ 277   1          while (*s)                  //检测字符串结束标志
+ 278   1          {
+ 279   2              UART2_SendData(*s++);         //发送当前字符
+ 280   2          }
+ 281   1      }
+ 282          /************************************************
+ 283          主处理程序
+ 284          ************************************************/
+ 285          void handle(void)
+ 286          {
+ 287   1      //      if(step_motor_time_flag ==1)
+ 288   1      //      {
+ 289   1      //              step_motor_time_flag = 0;
+ 290   1      //      
+ 291   1      //      }
+ 292   1              if(RX1_Buffer[0]=='x')
+ 293   1              {
+ 294   2                              if(RX1_Buffer[1]=='y')
+ 295   2                              {
+ 296   3                                      RX1_Buffer[0] = 0;
+ 297   3                                      RX1_Buffer[1] = 0;
+ 298   3                                      uart_motor_com= RX1_Buffer[2];
+ 299   3                                      //RX1_Buffer[2] = 0;
+ 300   3      
+ 301   3                                      switch(uart_motor_com)
+ 302   3                                      {
+ 303   4                                              case 'm':step_motor_control(1,2000,1);step_motor_control(0,2000,0);break;//左电机运行5圈：前进  step(0
+C51 COMPILER V9.02   IAP15_DTH11                                                           11/26/2015 14:52:53 PAGE 6   
+
+             -,1,1);
+ 304   4                                              case 'n':step_motor_control(1,2000,0);step_motor_control(0,2000,1);break;//左电机运行：后推     step(0,1,
+             -0);
+ 305   4                                              case 'q':step_motor_control(1,0,1);step_motor_control(0,0,1);break;//左右电机同时停止运行break;//左电
+             -机停止运行  step(0,0,1);
+ 306   4      
+ 307   4                                              case 'o':step_motor_control(0,100,1);turn_flag = 1;break;//右电机运行：左转
+ 308   4                                              case 'p':step_motor_control(0,100,0);turn_flag = 1;break;//右电机运行：右转
+ 309   4                              
+ 310   4                                              default: break;
+ 311   4                                      } 
+ 312   3                                      
+ 313   3                                      if(RX1_Buffer[2]=='z')
+ 314   3                                      {
+ 315   4                                              dth11_flag = 1;
+ 316   4                                              if(dth11_flag == 1)
+ 317   4                                              {
+ 318   5                                              dth11_flag = 0;
+ 319   5                                              xx = DHT11_ReadTempAndHumi();
+ 320   5                                                      if(xx!=0)
+ 321   5                                                      {
+ 322   6                                                      
+ 323   6                                                      UART_send_byte(numberaa[temp_value/100]);
+ 324   6                                                      UART_send_byte(numberaa[temp_value % 100/ 10]);
+ 325   6                                                      UART_send_byte(numberaa[humi_value/100]);
+ 326   6                                                      UART_send_byte(numberaa[humi_value % 100/ 10]);
+ 327   6                                                      
+ 328   6                                                      }
+ 329   5                                                      else
+ 330   5                                                      {
+ 331   6                                                      //      UART_send_string("ERRER!:");
+ 332   6                                                      }
+ 333   5                                              }
+ 334   4                                      }       
+ 335   3                                      RX1_Buffer[2] = 0;
+ 336   3                                      
+ 337   3      //                      else if(RX1_Buffer[1]=='z')
+ 338   3      //                      {
+ 339   3      //                              dth11_flag = 1;
+ 340   3      //                              if(dth11_flag == 1)
+ 341   3      //                              {
+ 342   3      //                                      dth11_flag = 0;
+ 343   3      //                                      xx = DHT11_ReadTempAndHumi();
+ 344   3      //                                      if(xx!=0)
+ 345   3      //                                      {
+ 346   3      //                                          
+ 347   3      //                                              UART_send_byte(numberaa[temp_value/100]);
+ 348   3      //                                              UART_send_byte(numberaa[temp_value % 100/ 10]);
+ 349   3      //                                              UART_send_byte(numberaa[humi_value/100]);
+ 350   3      //                                              UART_send_byte(numberaa[humi_value % 100/ 10]);
+ 351   3      //
+ 352   3      //                                      }
+ 353   3      //                                      else
+ 354   3      //                                      {
+ 355   3      //                                      //      UART_send_string("ERRER!:");
+ 356   3      //                                      }
+ 357   3      //                              }
+ 358   3                              }
+ 359   2      
+ 360   2              }
+ 361   1              else
+ 362   1              {
+C51 COMPILER V9.02   IAP15_DTH11                                                           11/26/2015 14:52:53 PAGE 7   
+
+ 363   2              
+ 364   2              }
+ 365   1      }
+ 366          void Delay1ms(u16 x)            //@24.000MHz
+ 367          {
+ 368   1              unsigned char i, j;
+ 369   1              while(x--)
+ 370   1              {
+ 371   2                      i = 24;
+ 372   2                      j = 85;
+ 373   2                      do
+ 374   2                      {
+ 375   3                              while (--j);
+ 376   3                      } while (--i);
+ 377   2              }
+ 378   1      
+ 379   1      }
+ 380          void Delay1us(void)             //@24.000MHz
+ 381          {
+ 382   1              unsigned char i;
+ 383   1      
+ 384   1              _nop_();
+ 385   1              _nop_();
+ 386   1              i = 3;
+ 387   1              while (--i);
+ 388   1      }
+ 389          /*----------------------------
+ 390          步进电机控制函数
+ 391          motor      : 1, left motor control
+ 392                           0, rihgt motor control
+ 393          
+ 394          step       : step number
+ 395          
+ 396          dir        : 1, go
+ 397                           0, back;
+ 398          ---------------------------*/
+ 399          void step_motor_control(u8 motor,u16 step,u8 dir)
+ 400          {
+ 401   1              //左电机 控制
+ 402   1              if(motor == 1)
+ 403   1              {
+ 404   2                      step_motor_left_flag = 1;
+ 405   2                      left_step_set = step;
+ 406   2                      left_dir = dir;
+ 407   2              }
+ 408   1              //右电机 控制
+ 409   1              else
+ 410   1              {
+ 411   2                      step_motor_right_flag = 1;
+ 412   2                      right_step_set = step;
+ 413   2                      right_dir = dir;
+ 414   2              }
+ 415   1      
+ 416   1      }
+ 417          
+ 418          //步进电机抱死切换函数（驱动是否有效切换函数）
+ 419          void clock_change(void)
+ 420          {
+ 421   1              if(sw1 == 1)
+ 422   1              {
+ 423   2                      step_clock = 1;//默认不报死，（驱动板en失效）防止发烫   
+ 424   2              }
+C51 COMPILER V9.02   IAP15_DTH11                                                           11/26/2015 14:52:53 PAGE 8   
+
+ 425   1              else
+ 426   1              {
+ 427   2                      step_clock = 0;//报死（驱动板起效）     
+ 428   2              }       
+ 429   1      }
+ 430          
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    758    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =     28       6
+   IDATA SIZE       =     10    ----
+   BIT SIZE         =      9    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

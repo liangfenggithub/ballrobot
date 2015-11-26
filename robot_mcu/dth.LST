@@ -1,0 +1,190 @@
+C51 COMPILER V9.02   DTH                                                                   11/26/2015 14:52:53 PAGE 1   
+
+
+C51 COMPILER V9.02, COMPILATION OF MODULE DTH
+OBJECT MODULE PLACED IN dth.OBJ
+COMPILER INVOKED BY: C:\Keil\C51\BIN\C51.EXE dth.c BROWSE DEBUG OBJECTEXTEND
+
+line level    source
+
+   1          /*****************************************************************************/ 
+   2          /*****************************************************************************/ 
+   3          /*****************************************************************************/ 
+   4          //文件名是 dht11.c 
+   5          #include "dth.h"
+   6          #include <config0.H>
+   7          #include <STC15F2K60S2.H>
+   8          #include<delay.h>
+   9          
+  10          //请根据自己的 dht11 接的 IO 口来改动位定义
+  11          sbit dht11 = P5^5; 
+  12          
+  13          //防止在与硬件通信时发生死循环的计数范围
+  14          #define NUMBER   150
+  15          
+  16          #define SIZE 5 
+  17          static unsigned char status; 
+  18          //存放五字节数据的数组
+  19          static unsigned char value_array[SIZE]; 
+  20          /*可在其他的文件引用温湿度值,实际是温度的整数的 10 倍
+  21          如 dht11 读回的温度是 26,则 temp_value = 260,  湿度同理*/ 
+  22          int temp_value, humi_value; 
+  23          
+  24          
+  25          
+  26          static unsigned char ReadValue(void); 
+  27          
+  28          
+  29          
+  30          /*读一个字节的数据*/ 
+  31          static unsigned char DHT11_ReadValue(void) 
+  32          { 
+  33   1              unsigned char count, value = 0, i; 
+  34   1              status = OK;      //设定标志为正常状态
+  35   1              for(i = 8; i > 0; i--) 
+  36   1              {
+  37   2                      //高位在先
+  38   2                      value<<= 1;
+  39   2                      count = 0;
+  40   2                      //每一位数据前会有一个 50us 的低电平时间.等待 50us 低电平结束
+  41   2                      while(dht11 == 0 && count++ < NUMBER); 
+  42   2                      if(count>= NUMBER)
+  43   2                      {
+  44   3                              status = ERROR;//设定错误标志
+  45   3                              return 0;//函数执行过程发生错误就退出函数
+  46   3                      }
+  47   2                      //26-28us 的高电平表示该位是 0,为 70us 高电平表该位 1 
+  48   2                      DHT11Delay_10us();
+  49   2                      DHT11Delay_10us();
+  50   2                      DHT11Delay_10us();
+  51   2                      //延时 30us 后检测数据线是否还是高电平
+  52   2                      if(dht11 != 0)
+  53   2                      {
+  54   3                              //进入这里表示该位是 1 
+  55   3                              value++; 
+C51 COMPILER V9.02   DTH                                                                   11/26/2015 14:52:53 PAGE 2   
+
+  56   3                              //等待剩余(约 40us)的高电平结束
+  57   3                              while(dht11 != 0 && count++ < NUMBER) 
+  58   3                              {
+  59   4                                      dht11 = 1;
+  60   4                              }
+  61   3                              if(count>= NUMBER)
+  62   3                              {
+  63   4                                      status = ERROR;       //设定错误标志
+  64   4                                      return 0;
+  65   4                              }
+  66   3                      } 
+  67   2      
+  68   2      
+  69   2              }
+  70   1              return(value);
+  71   1      }
+  72          
+  73          
+  74          
+  75          
+  76          
+  77          //读温度和湿度函数，读一次的数据,共五字节，读出成功函数返回 OK,  错误返回 ERROR 
+  78          extern unsigned char DHT11_ReadTempAndHumi(void) 
+  79          {
+  80   1              unsigned char i = 0, check_value = 0,count = 0; 
+  81   1              //EA = 0; 
+  82   1      
+  83   1              dht11 = 0; 
+  84   1              //拉低数据线大于 18ms 发送开始信号
+  85   1      
+  86   1              delay_ms(20);   //需大于 18 毫秒
+  87   1      
+  88   1              dht11 = 1; 
+  89   1               //释放数据线,用于检测低电平的应答信号
+  90   1      
+  91   1              //延时 20-40us,等待一段时间后检测应答信号,应答信号是从机拉低数据线 80us 
+  92   1              DHT11Delay_10us();
+  93   1              DHT11Delay_10us();
+  94   1              DHT11Delay_10us();
+  95   1              DHT11Delay_10us();
+  96   1              if(dht11 != 0)    //检测应答信号,应答信号是低电平
+  97   1              {
+  98   2                      //没应答信号
+  99   2                      //EA = 1;
+ 100   2                      return ERROR;
+ 101   2              }
+ 102   1              else
+ 103   1              {
+ 104   2                      //有应答信号
+ 105   2                      while(dht11 == 0 && count++ < NUMBER);     //等待应答信号结束
+ 106   2                      if(count>= NUMBER)   //检测计数器是否超过了设定的范围
+ 107   2                      {
+ 108   3                              dht11 = 1; 
+ 109   3                              //EA = 1; 
+ 110   3                              return ERROR;//读数据出错,退出函数
+ 111   3                      }       
+ 112   2                      count = 0;
+ 113   2                      dht11 = 1;//释放数据线
+ 114   2                      //应答信号后会有一个 80us 的高电平，等待高电平结束
+ 115   2                      while(dht11 != 0 && count++ < NUMBER); 
+ 116   2                      if(count>= NUMBER)
+ 117   2                      {
+C51 COMPILER V9.02   DTH                                                                   11/26/2015 14:52:53 PAGE 3   
+
+ 118   3                              dht11 = 1; 
+ 119   3                              //EA = 1; 
+ 120   3                              return ERROR;   //退出函数
+ 121   3                      }
+ 122   2      
+ 123   2                      //读出湿.温度值
+ 124   2                      for(i = 0; i < SIZE; i++) 
+ 125   2                      {
+ 126   3                              value_array[i] = DHT11_ReadValue();
+ 127   3                              if(status== ERROR)//调用 ReadValue()读数据出错会设定 status 为 ERROR 
+ 128   3                              {
+ 129   4                                      dht11 = 1;
+ 130   4                                      //EA = 1;
+ 131   4                                      return ERROR;
+ 132   4                              }
+ 133   3                              //读出的最后一个值是校验值不需加上去
+ 134   3                              if(i!= SIZE -1)
+ 135   3                              {
+ 136   4                                      //读出的五字节数据中的前四字节数据和等于第五字节数据表示成功
+ 137   4                                      check_value += value_array[i];
+ 138   4                              }
+ 139   3                      }//end for
+ 140   2                      //在没用发生函数调用失败时进行校验
+ 141   2                      if(check_value == value_array[SIZE - 1]) 
+ 142   2                      {
+ 143   3                              //将温湿度扩大 10 倍方便分离出每一位
+ 144   3                              humi_value= value_array[0] * 10;
+ 145   3                              temp_value= value_array[2] *10;
+ 146   3                              dht11 = 1; 
+ 147   3                              //EA = 1; 
+ 148   3                              return OK;//正确的读出 dht11 输出的数据
+ 149   3                      } 
+ 150   2                      else 
+ 151   2                      {
+ 152   3                              //校验数据出错
+ 153   3                              //EA = 1; 
+ 154   3                              return ERROR;
+ 155   3      
+ 156   3                      }
+ 157   2              }
+ 158   1      }
+ 159          
+ 160          
+ 161          /*****************************************************************************/ 
+ 162          /*****************************************************************************/ 
+ 163          /*****************************************************************************/ 
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    262    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =     10       6
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
